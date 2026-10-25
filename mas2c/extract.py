@@ -1,4 +1,5 @@
 """General LLM-driven frontend: any MAS repo -> IR. No framework-specific parsing."""
+import json
 import os
 import sys
 from . import ir as IRM
@@ -70,28 +71,73 @@ def ask_json(system, user):
         return parse_json(chat(msgs))
 
 
-def merge(partials):
-    """Union by id; same-id vars union values, nodes union effects; duplicate edges (src,dst,guard) dropped."""
+def _content(key, x):
+    """What a fact says, ignoring its model-assigned id. Equal content means a real duplicate."""
+    if key == "edges":
+        return (x.src, x.dst, (x.guard or "").strip() or None, tuple(x.effect or ()), x.enforcement)
+    if key == "decisions":
+        return (x.node, x.var, tuple(sorted(map(str, x.outcomes))))
+    if key == "loops":
+        return (x.back_edge, x.bound, x.enforcement)
+    return (x.kind, json.dumps(x.args, sort_keys=True))  # properties
+
+
+def merge(partials, log=sys.stderr):
+    """Combine per-chunk IRs without losing facts.
+
+    Nodes and vars: same id = same entity; effects and values are unioned.
+    Edges, decisions, loops: each chunk invents its own ids, so these are matched by
+    content. An exact duplicate is dropped; anything else is kept, renamed on an id
+    clash. The result over-approximates the MAS, so merging cannot remove a path or a
+    check. Every merge, drop and rename is logged."""
     ir = IRM.IR()
-    seen = {k: {} for k in IRM.LISTS}
-    for p in partials:
-        for key in IRM.LISTS:
-            for item in getattr(p, key):
-                prev = seen[key].get(item.id)
-                if prev is None:
-                    seen[key][item.id] = item
-                    getattr(ir, key).append(item)
-                elif key == "vars":
-                    prev.values += [v for v in item.values if v not in prev.values]
-                elif key == "nodes":
-                    prev.effects += [e for e in item.effects if e not in prev.effects]
-                    prev.hitl = prev.hitl or item.hitl
-    sig = set()
-    ir.edges = [e for e in ir.edges if (e.src, e.dst, e.guard) not in sig and not sig.add((e.src, e.dst, e.guard))]
+    kept = {k: {} for k in IRM.LISTS}  # id -> (fact, chunk index)
+    seen = {k: {} for k in IRM.LISTS}  # content -> kept id
+    say = lambda msg: print(f"[merge] {msg}", file=log)
+    for i, p in enumerate(partials):
+        remap = {}  # this chunk's edge ids -> final ids, so its own loops still point at them
+        for key in IRM.LISTS:  # edges come before loops
+            for x in getattr(p, key):
+                where = " ".join(w for w in (f"chunk {i}" if len(partials) > 1 else "", x.ev.file if x.ev else "") if w)
+                prev = kept[key].get(x.id)
+                if key in ("nodes", "vars") and prev:
+                    y = prev[0]
+                    if key == "nodes":
+                        new = [e for e in x.effects if e not in y.effects]
+                        y.effects += new
+                        y.hitl = y.hitl or x.hitl
+                        clash = f"; kind conflict, kept {y.kind!r} over {x.kind!r}" if x.kind != y.kind else ""
+                        say(f"nodes/{x.id}: merged copy from {where}, added effects {new}{clash}")
+                    else:
+                        new = [v for v in x.values if v not in y.values]
+                        y.values += new
+                        clash = f"; type conflict, kept {y.type!r} over {x.type!r}" if x.type != y.type else ""
+                        say(f"vars/{x.id}: merged copy from {where}, added values {new}{clash}")
+                    continue
+                if key not in ("nodes", "vars"):
+                    if key == "loops":
+                        x.back_edge = remap.get(x.back_edge, x.back_edge)
+                    c = _content(key, x)
+                    if c in seen[key]:
+                        say(f"{key}/{x.id}: dropped, same content as {seen[key][c]} ({where})")
+                        if key == "edges":
+                            remap[x.id] = seen[key][c]
+                        continue
+                    if prev:
+                        new_id, n = f"{x.id}__chunk{i}", 2
+                        while new_id in kept[key]:
+                            new_id, n = f"{x.id}__chunk{i}_{n}", n + 1
+                        say(f"{key}/{x.id}: id already used by a different fact (chunk {prev[1]}), kept as {new_id} ({where})")
+                        if key == "edges" and prev[1] != i:  # within one chunk the reference is ambiguous
+                            remap[x.id] = new_id
+                        x.id = new_id
+                    seen[key][c] = x.id
+                kept[key][x.id] = (x, i)
+                getattr(ir, key).append(x)
     return ir
 
 
-def rename(ir, nodes, vars_):
+def rename(ir, nodes, vars_, log=sys.stderr):
     nodes = {k: v for k, v in nodes.items() if k != v}
     vars_ = {k: v for k, v in vars_.items() if k != v}
     n = lambda x: nodes.get(x, x)
@@ -104,7 +150,7 @@ def rename(ir, nodes, vars_):
         x.id = n(x.id)
     for x in ir.vars:
         x.id = v(x.id)
-    return merge([ir])
+    return merge([ir], log)
 
 
 def extract(repo, name=None, log=sys.stderr):
@@ -119,13 +165,12 @@ def extract(repo, name=None, log=sys.stderr):
         return IRM.from_dict(ask_json(SYSTEM, c))
     with ThreadPoolExecutor(int(os.environ.get("MAS2C_JOBS", "4"))) as ex:
         partials = list(ex.map(one, enumerate(chunks)))
-    ir = merge(partials)
+    ir = merge(partials, log)
     ir.name = name or os.path.basename(os.path.abspath(repo))
     if len(chunks) > 1:
-        import json
         summary = {"nodes": [{"id": n.id, "kind": n.kind, "file": n.ev.file if n.ev else None} for n in ir.nodes],
                    "vars": [{"id": v.id, "type": v.type, "values": v.values[:8]} for v in ir.vars]}
         r = ask_json(UNIFY, json.dumps(summary, indent=0))
-        ir = rename(ir, r.get("nodes", {}) or {}, r.get("vars", {}) or {})
+        ir = rename(ir, r.get("nodes", {}) or {}, r.get("vars", {}) or {}, log)
         ir.name = name or os.path.basename(os.path.abspath(repo))
     return ir, files
