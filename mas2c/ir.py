@@ -6,6 +6,8 @@ from typing import Optional
 EFFECTS = ["fs_write", "shell", "src_mutate", "network", "perm_bypass", "spawn", "editor"]
 DANGEROUS = {"shell", "src_mutate", "perm_bypass"}
 NODE_KINDS = ["agent", "skill", "hook", "command", "human"]
+GUARD_KINDS = ["only_if", "whenever", "iff", "advisory"]   # permission / obligation / both / no rule
+ENFORCEMENT = ["code", "weak", "prose"]                    # weak: a script exists but its blocking is unverified
 CODE_EXTS = (".sh", ".py", ".js", ".ts", ".json", ".yaml", ".yml", ".toml")
 
 
@@ -22,6 +24,7 @@ class Var:
     type: str                      # enum | bool | int
     init: object = None
     values: list = field(default_factory=list)
+    env: bool = False              # set by nothing in the MAS: an external fact, chosen by the fuzzer at start
     ev: Optional[Ev] = None
 
 
@@ -29,7 +32,9 @@ class Var:
 class Node:
     id: str
     kind: str                      # agent | skill | hook | command | human
-    effects: list = field(default_factory=list)
+    effects: list = field(default_factory=list)            # capabilities (tools/permissions it holds)
+    forbidden_effects: list = field(default_factory=list)  # capabilities its instructions forbid it to use
+    aliases: list = field(default_factory=list)            # every surface name the source uses for it (frontmatter name, file stem, invocation string)
     hitl: bool = False
     ev: Optional[Ev] = None
 
@@ -49,8 +54,9 @@ class Edge:
     src: str
     dst: str
     guard: Optional[str] = None
+    guard_kind: str = "only_if"    # only_if: take only when guard | whenever: must take when guard | iff: both | advisory: no rule
     effect: Optional[list] = None  # ["var = VALUE", ...]
-    enforcement: str = "prose"     # code | prose
+    enforcement: str = "prose"     # code | weak | prose
     ev: Optional[Ev] = None
 
 
@@ -66,8 +72,16 @@ class Loop:
 @dataclass
 class Property:
     id: str
-    kind: str                      # never | only_after | bounded
+    kind: str                      # never | only_after | bounded | must | forbidden
     args: dict = field(default_factory=dict)
+    ev: Optional[Ev] = None
+
+
+@dataclass
+class Ref:
+    """A name a chunk uses but does not define: the linker resolves it against node aliases."""
+    id: str
+    name: str
     ev: Optional[Ev] = None
 
 
@@ -80,9 +94,10 @@ class IR:
     edges: list = field(default_factory=list)
     loops: list = field(default_factory=list)
     properties: list = field(default_factory=list)
+    refs: list = field(default_factory=list)
 
 
-LISTS = {"vars": Var, "nodes": Node, "decisions": Decision, "edges": Edge, "loops": Loop, "properties": Property}
+LISTS = {"vars": Var, "nodes": Node, "decisions": Decision, "edges": Edge, "loops": Loop, "properties": Property, "refs": Ref}
 
 
 def _build(cls, d):
@@ -123,10 +138,14 @@ def dump(ir, path):
 
 
 SCHEMA = """{
- "vars":      [{"id": "snake_id", "type": "enum|bool|int", "init": "<value>", "values": ["V1","V2"], "ev": EV}],
- "nodes":     [{"id": "snake_id", "kind": "agent|skill|hook|command|human", "effects": ["fs_write|shell|src_mutate|network|perm_bypass|spawn|editor"], "hitl": false, "ev": EV}],
- "decisions": [{"id": "snake_id", "node": "node_id", "var": "var_id", "outcomes": ["V1","V2"], "ev": EV}],
- "edges":     [{"id": "snake_id", "src": "node_id", "dst": "node_id", "guard": "expr or null", "effect": ["var = V1"] , "enforcement": "code|prose", "ev": EV}],
- "loops":     [{"id": "snake_id", "back_edge": "edge_id", "bound": 5, "enforcement": "code|prose", "ev": EV}]
+ "vars":       [{"id": "snake_id", "type": "enum|bool|int", "init": "<value>", "values": ["V1","V2"], "ev": EV}],
+ "nodes":      [{"id": "snake_id", "kind": "agent|skill|hook|command|human", "effects": ["fs_write|shell|src_mutate|network|perm_bypass|spawn|editor"], "forbidden_effects": [], "aliases": ["name-as-written"], "hitl": false, "ev": EV}],
+ "refs":       [{"id": "snake_id", "name": "exact string used here but defined elsewhere", "ev": EV}],
+ "decisions":  [{"id": "snake_id", "node": "node_id", "var": "var_id", "outcomes": ["V1","V2"], "ev": EV}],
+ "edges":      [{"id": "snake_id", "src": "node_id", "dst": "node_id", "guard": "expr or null", "guard_kind": "only_if|whenever|iff|advisory", "effect": ["var = V1"], "enforcement": "code|weak|prose", "ev": EV}],
+ "loops":      [{"id": "snake_id", "back_edge": "edge_id", "bound": 5, "enforcement": "code|weak|prose", "ev": EV}],
+ "properties": [{"id": "snake_id", "kind": "only_after", "args": {"node": "node_id", "after": "node_id"}, "ev": EV},
+                {"id": "snake_id", "kind": "never", "args": {"node": "node_id", "unless": "expr", "at": "entry|exit"}, "ev": EV}],
+ "disposed":   [{"at": "path:line", "as": "edge|property|forbidden_effect|decision|loop|data_rule|duplicate|not_a_rule"}]
 }
 EV = {"file": "relative/path", "line": 12, "text": "verbatim substring of that line"}"""

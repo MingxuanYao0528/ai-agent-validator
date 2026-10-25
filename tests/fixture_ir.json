@@ -4,13 +4,17 @@
   {"id": "verdict", "type": "enum", "init": "NONE", "values": ["NONE", "SOUND", "UNSOUND"],
    "ev": {"file": "planner.md", "line": 10, "text": "verdict: SOUND or UNSOUND"}},
   {"id": "approved", "type": "bool", "init": false,
-   "ev": {"file": "gate.sh", "line": 5, "text": "-f approved.flag"}}
+   "ev": {"file": "gate.sh", "line": 5, "text": "-f approved.flag"}},
+  {"id": "tests_pass", "type": "bool", "init": false,
+   "ev": {"file": "executor.md", "line": 8, "text": "run `npm test` until it passes"}}
  ],
  "nodes": [
-  {"id": "planner", "kind": "agent", "effects": ["fs_write"], "ev": {"file": "planner.md", "line": 2, "text": "name: planner"}},
+  {"id": "planner", "kind": "agent", "effects": ["fs_write", "shell"], "forbidden_effects": ["shell"],
+   "ev": {"file": "planner.md", "line": 7, "text": "You never run shell commands yourself"}},
   {"id": "auditor", "kind": "agent", "effects": [], "ev": {"file": "planner.md", "line": 9, "text": "dispatch the **auditor** agent"}},
+  {"id": "researcher", "kind": "agent", "effects": ["network"], "ev": {"file": "planner.md", "line": 16, "text": "consult the **researcher** agent"}},
   {"id": "user", "kind": "human", "hitl": true, "ev": {"file": "planner.md", "line": 13, "text": "escalate to the user"}},
-  {"id": "gate", "kind": "hook", "ev": {"file": "gate.sh", "line": 5, "text": "\"$AGENT\" == \"executor\""}},
+  {"id": "gate", "kind": "hook", "effects": ["shell"], "ev": {"file": "gate.sh", "line": 5, "text": "\"$AGENT\" == \"executor\""}},
   {"id": "executor", "kind": "agent", "effects": ["shell", "src_mutate", "perm_bypass"],
    "ev": {"file": "executor.md", "line": 4, "text": "permissionMode: bypassPermissions"}}
  ],
@@ -23,18 +27,27 @@
    "ev": {"file": "planner.md", "line": 9, "text": "dispatch the **auditor** agent to review it"}},
   {"id": "e_handoff_executor", "src": "planner", "dst": "gate", "guard": "verdict == SOUND", "enforcement": "prose",
    "ev": {"file": "planner.md", "line": 15, "text": "When the verdict is SOUND, hand off"}},
+  {"id": "e_consult", "src": "planner", "dst": "researcher", "guard": "needs_background", "guard_kind": "advisory", "enforcement": "prose",
+   "ev": {"file": "planner.md", "line": 16, "text": "Optionally, consult the **researcher**"}},
+  {"id": "e_research_done", "src": "researcher", "dst": "planner", "enforcement": "prose",
+   "ev": {"file": "planner.md", "line": 16, "text": "for background first"}},
   {"id": "e_escalate", "src": "auditor", "dst": "user", "enforcement": "prose",
    "ev": {"file": "planner.md", "line": 13, "text": "escalate to the user instead"}},
-  {"id": "e_revise", "src": "auditor", "dst": "planner", "guard": "verdict == UNSOUND", "enforcement": "prose",
-   "ev": {"file": "planner.md", "line": 12, "text": "If the verdict is UNSOUND, revise the plan"}},
+  {"id": "e_revise", "src": "auditor", "dst": "planner", "guard": "verdict == UNSOUND", "guard_kind": "iff", "enforcement": "prose",
+   "ev": {"file": "planner.md", "line": 12, "text": "If the verdict is UNSOUND, you must revise the plan"}},
   {"id": "e_user_approve", "src": "user", "dst": "gate", "effect": ["approved = true"], "enforcement": "prose",
    "ev": {"file": "planner.md", "line": 13, "text": "escalate to the user"}},
-  {"id": "e_gate_pass", "src": "gate", "dst": "executor", "guard": "approved", "enforcement": "code",
+  {"id": "e_gate_pass", "src": "gate", "dst": "executor", "guard": "approved", "enforcement": "weak",
    "ev": {"file": "gate.sh", "line": 5, "text": "! -f approved.flag"}}
  ],
  "loops": [
   {"id": "revise_loop", "back_edge": "e_revise", "bound": 3, "enforcement": "prose",
-   "ev": {"file": "planner.md", "line": 13, "text": "Do not revise more than 3 times"}}
+   "ev": {"file": "planner.md", "line": 13, "text": "Do not revise more than 3 times"}},
+  {"id": "research_loop", "back_edge": "e_research_done", "bound": null, "enforcement": "prose",
+   "ev": {"file": "planner.md", "line": 16, "text": "for background first"}}
  ],
- "properties": []
+ "properties": [
+  {"id": "exec_after_plan", "kind": "only_after", "args": {"node": "executor", "after": "planner"},
+   "ev": {"file": "executor.md", "line": 10, "text": "Never start before the planner has written the plan"}}
+ ]
 }
