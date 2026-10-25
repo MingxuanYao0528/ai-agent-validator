@@ -1,0 +1,4 @@
+.env
+.mas2c-cache/
+out/
+__pycache__/
